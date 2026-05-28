@@ -76,14 +76,80 @@ class DoudizhuRoomHost(
 
     fun startGame() {
         val state = engine.newGame()
+        _players.clear()
+        _players.add(PlayerInfo(playerId, playerName, 0, points))
+        // 虚拟 AI 对手
+        _players.add(PlayerInfo("ai_1", "AI玩家A", 1, 10000))
+        _players.add(PlayerInfo("ai_2", "AI玩家B", 2, 10000))
         _events.tryEmit(RoomEvent.StateUpdated(state))
+        // 如果第一个叫地主的不是房主，AI 自动叫
+        autoAdvanceAfterBid()
     }
 
     fun hostBid(score: Int) {
         val result = engine.bid(0, score)
+        handleBidResult(result)
+    }
+
+    fun hostPlay(cards: List<Card>): Boolean {
+        val result = engine.play(0, cards)
+        return handlePlayResult(result)
+    }
+
+    fun hostPass(): Boolean {
+        val result = engine.pass(0)
+        return handlePlayResult(result)
+    }
+
+    // ===== AI 自动推进 =====
+
+    private fun autoAdvanceAfterBid() {
+        val state = engine.getState()
+        if (state.phase != GamePhase.BIDDING) return
+        while (state.currentPlayerIndex != 0 && state.phase == GamePhase.BIDDING) {
+            val idx = state.currentPlayerIndex
+            val hand = engine.getHand(idx)
+            val currentBid = 0  // simulate: track current highest bid
+            val aiScore = DoudizhuAI.decideBid(hand, currentBid)
+            val result = engine.bid(idx, aiScore)
+            handleBidResult(result)
+            if (result is BidActionResult.BiddingDone || result is BidActionResult.Restart) break
+        }
+    }
+
+    private fun autoAdvanceAfterPlay() {
+        val state = engine.getState()
+        if (state.phase != GamePhase.PLAYING) return
+        if (state.currentPlayerIndex == 0) return
+        scope.launch {
+            delay(600) // 短暂延迟模拟思考
+            var currentState = engine.getState()
+            while (currentState.currentPlayerIndex != 0 && currentState.phase == GamePhase.PLAYING) {
+                val idx = currentState.currentPlayerIndex
+                val hand = engine.getHand(idx)
+                val lastPlay = currentState.lastPlay
+                val aiCards = if (lastPlay == null || lastPlay.playerIndex == idx) {
+                    DoudizhuAI.decideFreePlay(hand)
+                } else {
+                    DoudizhuAI.decideResponse(hand, lastPlay)
+                }
+                val result = if (aiCards.isEmpty()) engine.pass(idx) else engine.play(idx, aiCards)
+                handlePlayResult(result)
+                currentState = engine.getState()
+            }
+        }
+    }
+
+    private fun handleBidResult(result: BidActionResult) {
         when (result) {
-            is BidActionResult.ContinueBidding -> _events.tryEmit(RoomEvent.StateUpdated(result.state))
-            is BidActionResult.BiddingDone -> _events.tryEmit(RoomEvent.StateUpdated(result.state))
+            is BidActionResult.ContinueBidding -> {
+                _events.tryEmit(RoomEvent.StateUpdated(result.state))
+                autoAdvanceAfterBid()
+            }
+            is BidActionResult.BiddingDone -> {
+                _events.tryEmit(RoomEvent.StateUpdated(result.state))
+                autoAdvanceAfterPlay()
+            }
             is BidActionResult.Restart -> {
                 _events.tryEmit(RoomEvent.StateUpdated(result.state))
                 scope.launch { delay(500); startGame() }
@@ -91,26 +157,31 @@ class DoudizhuRoomHost(
         }
     }
 
-    fun hostPlay(cards: List<Card>): Boolean {
-        val result = engine.play(0, cards)
+    private fun handlePlayResult(result: PlayActionResult): Boolean {
         return when (result) {
-            is PlayActionResult.Accepted -> { _events.tryEmit(RoomEvent.StateUpdated(result.state)); true }
-            is PlayActionResult.Passed -> { _events.tryEmit(RoomEvent.StateUpdated(result.state)); true }
+            is PlayActionResult.Accepted -> {
+                _events.tryEmit(RoomEvent.StateUpdated(result.state))
+                autoAdvanceAfterPlay()
+                true
+            }
+            is PlayActionResult.Passed -> {
+                _events.tryEmit(RoomEvent.StateUpdated(result.state))
+                autoAdvanceAfterPlay()
+                true
+            }
             is PlayActionResult.GameOver -> {
-                _events.tryEmit(RoomEvent.GameEnded(result.state, result.result)); true
+                _events.tryEmit(RoomEvent.GameEnded(result.state, result.result))
+                autoRestart()
+                true
             }
             is PlayActionResult.Invalid -> false
         }
     }
 
-    fun hostPass(): Boolean {
-        val result = engine.pass(0)
-        return when (result) {
-            is PlayActionResult.Passed -> { _events.tryEmit(RoomEvent.StateUpdated(result.state)); true }
-            is PlayActionResult.GameOver -> {
-                _events.tryEmit(RoomEvent.GameEnded(result.state, result.result)); true
-            }
-            else -> false
+    private fun autoRestart() {
+        scope.launch {
+            delay(3500)
+            if (isRunning) startGame()
         }
     }
 
@@ -207,7 +278,7 @@ class DoudizhuRoomHost(
         fun getLocalIpAddress(): String {
             return java.net.NetworkInterface.getNetworkInterfaces().asSequence()
                 .flatMap { it.inetAddresses.asSequence() }
-                .filter { !it.isLoopbackAddress && it.hostAddress.indexOf(':') == -1 }
+                .filter { !it.isLoopbackAddress && (it.hostAddress?.indexOf(':') ?: -1) == -1 }
                 .map { it.hostAddress }.firstOrNull() ?: "127.0.0.1"
         }
     }
