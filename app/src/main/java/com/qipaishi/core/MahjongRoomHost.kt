@@ -139,9 +139,9 @@ class MahjongRoomHost(
         server.broadcast(MessageType.GAME_OVER, GameOverInfo(
             winner = winner,
             winnerSide = if (winType == WinType.ZIMO) "ZIMO" else "DIANPAO",
-            scores = (0..3).associate { i ->
-                (playerIds[i] ?: "") to scoreManager.getPoints(playerIds[i] ?: "")
-            },
+            scores = (0..3).map { i ->
+                i to scoreManager.getPoints(playerIds[i] ?: "")
+            }.toMap(),
             finalMultiplier = fan
         ))
 

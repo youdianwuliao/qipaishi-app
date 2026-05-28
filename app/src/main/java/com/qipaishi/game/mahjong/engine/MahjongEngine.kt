@@ -62,7 +62,7 @@ class MahjongEngine {
 
         if (tile == null) {
             phase = Phase.DRAW_GAME
-            return DrawResult.drawGame(buildState())
+            return DrawResult.DrawGame(buildState())
         }
 
         drawnTile = tile
@@ -77,7 +77,7 @@ class MahjongEngine {
             val fan = WinPattern.calculateFan(
                 hands[playerIndex], melds[playerIndex], winType, playerIndex == dealerIndex
             )
-            return DrawResult.zimo(buildState(), playerIndex, fan)
+            return DrawResult.Zimo(buildState(), playerIndex, fan)
         }
 
         // 检查暗杠/加杠
@@ -85,7 +85,7 @@ class MahjongEngine {
         val addedGang = melds[playerIndex].let { MeldDetector.findAddedGang(hands[playerIndex], it) }
 
         phase = Phase.WAIT_DISCARD
-        return DrawResult.readyToDiscard(
+        return DrawResult.ReadyToDiscard(
             buildState(),
             canHiddenGang = hiddenGang != null,
             canAddedGang = addedGang != null
@@ -126,7 +126,7 @@ class MahjongEngine {
             return advanceToNextDraw(playerIndex)
         }
 
-        return DiscardResult.waitingResponse(buildState(), responses)
+        return DiscardResult.WaitingResponse(buildState(), responses)
     }
 
     /** 胡 */
@@ -142,7 +142,7 @@ class MahjongEngine {
             hands[playerIndex], melds[playerIndex], winType, playerIndex == dealerIndex
         )
 
-        return HuResult(buildState(), playerIndex, lastDiscardPlayer!!, fan, winType)
+        return HuResult.Success(buildState(), playerIndex, lastDiscardPlayer!!, fan, winType)
     }
 
     /** 杠 */
@@ -153,14 +153,14 @@ class MahjongEngine {
             MeldType.GANG_HIDDEN -> {
                 // 暗杠
                 val hidden = MeldDetector.findHiddenGang(hands[playerIndex])
-                    ?: return GangResult.invalid("没有可暗杠的牌")
+                    ?: return GangResult.Invalid("没有可暗杠的牌")
                 hands[playerIndex].removeAll(hidden)
                 melds[playerIndex].add(Meld(MeldType.GANG_HIDDEN, hidden, null))
             }
             MeldType.GANG_ADDED -> {
                 // 加杠
                 val added = MeldDetector.findAddedGang(hands[playerIndex], melds[playerIndex])
-                    ?: return GangResult.invalid("没有可加杠的牌")
+                    ?: return GangResult.Invalid("没有可加杠的牌")
                 hands[playerIndex].remove(added!!)
                 val targetMeld = melds[playerIndex].find {
                     it.type == MeldType.PENG && it.tiles.any { t ->
@@ -179,7 +179,7 @@ class MahjongEngine {
                 require(lastDiscard != null) { "没有可杠的牌" }
                 val tile = lastDiscard!!
                 if (!MeldDetector.canGangOpen(hands[playerIndex], tile)) {
-                    return GangResult.invalid("不能杠这张牌")
+                    return GangResult.Invalid("不能杠这张牌")
                 }
                 val same = hands[playerIndex].filter {
                     it.suit == tile.suit && it.value == tile.value
@@ -196,7 +196,7 @@ class MahjongEngine {
 
         if (tile == null) {
             phase = Phase.DRAW_GAME
-            return GangResult.drawGame(buildState())
+            return GangResult.DrawGame(buildState())
         }
 
         hands[playerIndex].add(tile)
@@ -207,23 +207,23 @@ class MahjongEngine {
             val fan = WinPattern.calculateFan(
                 hands[playerIndex], melds[playerIndex], WinType.GANG_KAI, playerIndex == dealerIndex
             )
-            return GangResult.gangKai(buildState(), playerIndex, fan)
+            return GangResult.GangKai(buildState(), playerIndex, fan)
         }
 
         drawnTile = tile
         currentPlayer = playerIndex
         phase = Phase.WAIT_DISCARD
 
-        return GangResult.success(buildState())
+        return GangResult.Success(buildState())
     }
 
     /** 碰 */
     fun peng(playerIndex: Int): PengResult {
         require(phase == Phase.WAIT_RESPONSE) { "当前不在回应阶段" }
-        val tile = lastDiscard ?: return PengResult.invalid("没有可碰的牌")
+        val tile = lastDiscard ?: return PengResult.Invalid("没有可碰的牌")
 
         if (!MeldDetector.canPeng(hands[playerIndex], tile)) {
-            return PengResult.invalid("不能碰这张牌")
+            return PengResult.Invalid("不能碰这张牌")
         }
 
         val same = hands[playerIndex].filter {
@@ -236,7 +236,7 @@ class MahjongEngine {
         currentPlayer = playerIndex
         phase = Phase.WAIT_DISCARD
 
-        return PengResult.success(buildState())
+        return PengResult.Success(buildState())
     }
 
     /** 吃 */
@@ -250,7 +250,7 @@ class MahjongEngine {
             option.all { t -> chiTiles.any { it.suit == t.suit && it.value == t.value } }
         }
 
-        if (matched == null) return ChiResult.invalid("不合法吃法")
+        if (matched == null) return ChiResult.Invalid("不合法吃法")
 
         // 从手牌移除（保留 discard 那张）
         val toRemove = matched.filter { it.id != lastDiscard!!.id || it.suit != lastDiscard!!.suit || it.value != lastDiscard!!.value }
@@ -261,13 +261,18 @@ class MahjongEngine {
         currentPlayer = playerIndex
         phase = Phase.WAIT_DISCARD
 
-        return ChiResult.success(buildState())
+        return ChiResult.Success(buildState())
     }
 
     /** 过（不操作） */
     fun pass(): PassResult {
         require(phase == Phase.WAIT_RESPONSE) { "当前不在回应阶段" }
-        return advanceToNextDraw(lastDiscardPlayer!!)
+        val result = advanceToNextDraw(lastDiscardPlayer!!)
+        return when (result) {
+            is DiscardResult.NextDraw -> PassResult.NextDraw(result.state)
+            is DiscardResult.DrawGame -> PassResult.DrawGame(result.state)
+            else -> PassResult.NextDraw(buildState())
+        }
     }
 
     /** 获取当前状态 */
@@ -284,10 +289,10 @@ class MahjongEngine {
 
         if (wall.isEmpty()) {
             phase = Phase.DRAW_GAME
-            return DiscardResult.drawGame(buildState())
+            return DiscardResult.DrawGame(buildState())
         }
 
-        return DiscardResult.nextDraw(buildState())
+        return DiscardResult.NextDraw(buildState())
     }
 
     private fun buildState(): MahjongState {

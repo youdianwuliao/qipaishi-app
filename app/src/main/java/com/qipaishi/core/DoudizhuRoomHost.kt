@@ -225,7 +225,7 @@ class DoudizhuRoomHost(
                 bombCount = state.bombCount,
                 winner = state.winner,
                 scores = if (state.winner != null) {
-                    scoreManager.getAllScores().associate { it.playerId to it.points }
+                    scoreManager.getAllScores().mapIndexed { i, ps -> i to ps.points }.toMap()
                 } else null
             )
 
