@@ -17,7 +17,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.qipaishi.network.RoomScanner
 import com.qipaishi.ui.theme.*
-import kotlinx.coroutines.flow.collectLatest
 
 /**
  * 大厅页面
