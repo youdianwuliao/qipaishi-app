@@ -19,7 +19,18 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // 用 debug 签名签发 release（正式发布需替换为正式 keystore）
+            signingConfig = signingConfigs.getByName("debug")
+        }
+    }
+
+    // 按 CPU 架构分包（减小 APK 体积）
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+            isUniversalApk = true
         }
     }
 

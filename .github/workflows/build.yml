@@ -1,0 +1,68 @@
+name: Build & Release APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.4'
+
+      - name: 设置 local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+          echo "android.useAndroidX=true" >> gradle.properties 2>/dev/null || echo "" > gradle.properties
+
+      - name: 安装 Android SDK 组件
+        run: |
+          yes | ${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager "platform-tools" "build-tools;34.0.0" "platforms;android-34"
+
+      - name: 编译 APK（多架构分包）
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: 列出生成的 APK
+        run: find app/build/outputs/apk -name "*.apk" -ls
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: qipaishi-apks
+          path: app/build/outputs/apk/**/*.apk
+          retention-days: 30
+
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main' && success()
+        with:
+          name: "棋牌室 v1.0"
+          body: |
+            ## 🀄 棋牌室 v1.0
+
+            下载对应你手机 CPU 架构的 APK：
+            - `arm64-v8a` — 绝大多数手机
+            - `armeabi-v7a` — 老旧 32 位手机  
+            - `x86_64` — 模拟器
+            - `universal` — 通用包
+
+            ### 使用
+            1. 两台手机装同一个 APK
+            2. 连同一 Wi-Fi
+            3. 打开 App → 自动发现 → 开打！
+          tag_name: v1.0
+          files: app/build/outputs/apk/**/*.apk
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
