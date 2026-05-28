@@ -2,170 +2,215 @@ package com.qipaishi.core
 
 import com.qipaishi.game.mahjong.engine.*
 import com.qipaishi.game.mahjong.model.*
-import com.qipaishi.network.*
-import com.qipaishi.network.protocol.*
 import kotlinx.coroutines.*
-import kotlinx.serialization.json.*
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 
 /**
- * 麻将房间主机（房主端）
- *
- * 协调 MahjongEngine + 网络 + 积分
+ * 麻将房间主机
  */
 class MahjongRoomHost(
     private val playerId: String,
     private val playerName: String,
     private val points: Int
 ) {
-    private val engine = MahjongEngine()
-    private val server = GameServer(DoudizhuRoomHost.GAME_PORT, 4, playerId, playerName, points)
-    private val scoreManager = ScoreManager(playerId)
+    val engine = MahjongEngine()
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
 
-    private var players = listOf<Pair<String, String>>()  // id → name
-    private var playerIds = mutableMapOf<Int, String>()  // index → id
+    private val _players = mutableListOf<DoudizhuRoomHost.PlayerInfo>()
     private var isRunning = false
-    private var broadcaster: RoomBroadcaster? = null
 
-    data class MahjongPlayerInfo(
-        val id: String,
-        val name: String,
-        val index: Int,
-        val points: Int
-    )
+    private val _events = MutableSharedFlow<MahjongRoomEvent>(replay = 0, extraBufferCapacity = 64)
+    val events: SharedFlow<MahjongRoomEvent> = _events.asSharedFlow()
+
+    sealed class MahjongRoomEvent {
+        data class StateUpdated(val state: MahjongState, val responses: Map<Int, PlayerResponses>? = null) : MahjongRoomEvent()
+        data class GameEnded(val state: MahjongState, val message: String) : MahjongRoomEvent()
+    }
 
     fun start(roomId: String) {
         isRunning = true
-        playerIds[0] = playerId
-        players = listOf(playerId to playerName)
+        _players.clear()
+        _players.add(DoudizhuRoomHost.PlayerInfo(playerId, playerName, 0, points))
+        _players.add(DoudizhuRoomHost.PlayerInfo("ai_1", "AI雀士A", 1, 10000))
+        _players.add(DoudizhuRoomHost.PlayerInfo("ai_2", "AI雀士B", 2, 10000))
+        _players.add(DoudizhuRoomHost.PlayerInfo("ai_3", "AI雀士C", 3, 10000))
+    }
 
-        server.start(scope)
+    fun startGame() {
+        val state = engine.newGame()
+        _events.tryEmit(MahjongRoomEvent.StateUpdated(state))
+        autoAdvanceIfNeeded(state)
+    }
 
-        broadcaster = RoomBroadcaster(RoomInfo(
-            roomId = roomId,
-            hostName = playerName,
-            game = "mahjong",
-            playerCount = 1,
-            maxPlayers = 4,
-            hostAddress = DoudizhuRoomHost.getLocalIpAddress()
-        ))
-        broadcaster!!.start(scope)
-
-        scope.launch {
-            server.messages.collect { incoming ->
-                handleMessage(incoming.playerIndex, incoming.playerId, incoming.message)
-            }
+    fun hostDraw() {
+        val state = engine.getState()
+        if (state.phase != "WAIT_DRAW" || state.currentPlayer != 0) return
+        val result = engine.draw(0)
+        when (result) {
+            is DrawResult.ReadyToDiscard -> _events.tryEmit(MahjongRoomEvent.StateUpdated(result.state))
+            is DrawResult.Zimo -> _events.tryEmit(MahjongRoomEvent.GameEnded(result.state, "🎉 自摸！${result.fan} 番"))
+            is DrawResult.DrawGame -> _events.tryEmit(MahjongRoomEvent.GameEnded(result.state, "流局"))
         }
     }
 
-    private fun handleMessage(playerIndex: Int, playerId: String, msg: GameMessage) {
-        when (msg.type) {
-            MessageType.JOIN -> {
-                val data = Json.decodeFromJsonElement<JoinRequest>(msg.data!!)
-                players = players + (data.playerId to data.playerName)
-                playerIds[playerIndex] = data.playerId
-                server.broadcast(MessageType.PLAYER_JOINED,
-                    PlayerJoined(data.playerId, data.playerName, playerIndex, data.points))
+    fun hostDiscard(tile: Tile) {
+        val result = engine.discard(0, tile)
+        handleDiscardResult(result)
+    }
 
-                if (players.size == 4) startGame()
-            }
-            "MAHJONG_DISCARD" -> {
-                val suit = msg.data?.jsonObject?.get("suit")?.jsonPrimitive?.content ?: return
-                val value = msg.data.jsonObject["value"]?.jsonPrimitive?.int ?: return
-                val id = msg.data.jsonObject["id"]?.jsonPrimitive?.int ?: return
-                val hand = engine.getHand(playerIndex)
-                val tile = hand.find { it.suit.name == suit && it.value == value && it.id == id } ?: return
-                val result = engine.discard(playerIndex, tile)
+    fun hostResponse(action: String, chiTiles: List<Tile> = emptyList()) {
+        val result = when (action) {
+            "hu" -> { val r = engine.hu(0); _events.tryEmit(MahjongRoomEvent.GameEnded(
+                (r as? HuResult.Success)?.state ?: engine.getState(), "🎉 胡了！"))
+                return }
+            "gang" -> handleGangResult(engine.gang(0))
+            "peng" -> handlePengResult(engine.peng(0))
+            "chi" -> handleChiResult(engine.chi(0, chiTiles))
+            "pass" -> handlePassResult(engine.pass())
+            else -> null
+        }
+    }
 
-                when (result) {
-                    is DiscardResult.NextDraw -> syncAll(result.state)
-                    is DiscardResult.WaitingResponse -> {
-                        syncAll(result.state)
-                        server.broadcast("MAHJONG_RESPONSES",
-                            mapOf("responses" to result.responses.mapKeys { it.key }))
+    // ===== AI 自动推进 =====
+
+    private fun autoAdvanceIfNeeded(state: MahjongState) {
+        if (state.currentPlayer == 0) return // 等人操作
+        aiPlay(state.currentPlayer)
+    }
+
+    private fun aiPlay(playerIdx: Int) {
+        scope.launch {
+            delay(500)
+            val state = engine.getState()
+            if (state.currentPlayer != playerIdx) return@launch
+
+            when (state.phase) {
+                "WAIT_DRAW" -> {
+                    val result = engine.draw(playerIdx)
+                    when (result) {
+                        is DrawResult.ReadyToDiscard -> {
+                            _events.tryEmit(MahjongRoomEvent.StateUpdated(result.state))
+                            delay(300)
+                            val hand = engine.getHand(playerIdx)
+                            val tile = MahjongAI.decideDiscard(hand, state.drawnTile)
+                            val dResult = engine.discard(playerIdx, tile)
+                            handleDiscardResult(dResult)
+                        }
+                        is DrawResult.Zimo -> _events.tryEmit(MahjongRoomEvent.GameEnded(result.state, "AI 自摸！${result.fan} 番"))
+                        is DrawResult.DrawGame -> _events.tryEmit(MahjongRoomEvent.GameEnded(result.state, "流局"))
                     }
-                    is DiscardResult.DrawGame -> syncAll(result.state)
+                }
+                "WAIT_RESPONSE" -> {
+                    // AI 回应：找到一个能回应的 AI，让它回应
+                    val respState = state
+                    // Find a non-host player who can respond
+                    val responders = (1..3).toList()
+                    var handled = false
+                    for (idx in responders) {
+                        val hand = engine.getHand(idx)
+                        val lastTile = state.lastDiscard ?: continue
+                        val canHu = WinPattern.canWin(hand + lastTile, engine.getMelds(idx))
+                        val canGang = MeldDetector.canGangOpen(hand, lastTile)
+                        val canPeng = MeldDetector.canPeng(hand, lastTile)
+                        val canChi = idx == (state.lastDiscardPlayer + 1) % 4 && MeldDetector.canChi(hand, lastTile).isNotEmpty()
+
+                        val resp = PlayerResponses(canHu, canGang, canPeng, canChi)
+                        if (canHu || canGang || canPeng || canChi) {
+                            val action = MahjongAI.decideResponse(resp)
+                            when (action) {
+                                "hu" -> {
+                                    val r = engine.hu(idx)
+                                    if (r is HuResult.Success) _events.tryEmit(MahjongRoomEvent.GameEnded(r.state, "AI 胡了！${r.fan} 番"))
+                                    handled = true; break
+                                }
+                                "gang" -> {
+                                    val r = handleGangResult(engine.gang(idx))
+                                    handled = true; break
+                                }
+                                "peng" -> {
+                                    val r = handlePengResult(engine.peng(idx))
+                                    handled = true; break
+                                }
+                                "chi" -> {
+                                    val options = MeldDetector.canChi(hand, lastTile)
+                                    val chosen = MahjongAI.decideChi(options)
+                                    val r = handleChiResult(engine.chi(idx, chosen))
+                                    handled = true; break
+                                }
+                            }
+                        }
+                    }
+                    if (!handled) {
+                        val pResult = engine.pass()
+                        handlePassResult(pResult)
+                    }
                 }
             }
-            "MAHJONG_HU" -> {
-                val result = engine.hu(playerIndex)
-                if (result is HuResult.Success) {
-                    syncAll(result.state)
-                    handleMahjongEnd(result.winner, result.loser, result.fan, result.winType)
-                }
+        }
+    }
+
+    // ===== 结果处理 =====
+
+    private fun handleDiscardResult(result: DiscardResult) {
+        when (result) {
+            is DiscardResult.WaitingResponse -> {
+                _events.tryEmit(MahjongRoomEvent.StateUpdated(result.state, result.responses))
+                // 如果有需要回应的 AI 玩家，自动回应
+                aiPlay(result.state.currentPlayer) // 这会触发 AI 的 response 处理
             }
-            "MAHJONG_PENG" -> {
-                val result = engine.peng(playerIndex)
-                if (result is PengResult.Success) syncAll(result.state)
+            is DiscardResult.NextDraw -> {
+                _events.tryEmit(MahjongRoomEvent.StateUpdated(result.state))
+                autoAdvanceIfNeeded(result.state)
             }
-            "MAHJONG_CHI" -> { /* 简化处理 */ }
-            "MAHJONG_GANG" -> engine.gang(playerIndex)
-            "MAHJONG_PASS" -> {
-                engine.pass()
-                val state = engine.getState()
-                syncAll(state)
+            is DiscardResult.DrawGame -> _events.tryEmit(MahjongRoomEvent.GameEnded(result.state, "流局"))
+        }
+    }
+
+    private fun handleGangResult(result: GangResult) {
+        when (result) {
+            is GangResult.Success -> {
+                _events.tryEmit(MahjongRoomEvent.StateUpdated(result.state))
+                autoAdvanceIfNeeded(result.state)
             }
-            MessageType.PLAYER_LEAVE -> handlePlayerLeave(playerIndex)
+            is GangResult.GangKai -> _events.tryEmit(MahjongRoomEvent.GameEnded(result.state, "🎉 杠上开花！${result.winner} 番"))
+            is GangResult.DrawGame -> _events.tryEmit(MahjongRoomEvent.GameEnded(result.state, "流局"))
+            is GangResult.Invalid -> {}
         }
     }
 
-    private fun startGame() {
-        val state = engine.newGame(0)
-        // 触发庄家摸牌
-        val drawResult = engine.draw(state.currentPlayer)
-        when (drawResult) {
-            is DrawResult.ReadyToDiscard -> syncAll(drawResult.state)
-            is DrawResult.Zimo -> handleMahjongEnd(drawResult.winner, -1, drawResult.fan, WinType.ZIMO)
-            else -> {}
-        }
-    }
-
-    private fun handleMahjongEnd(winner: Int, loser: Int, fan: Int, winType: WinType) {
-        val base = 1000 * fan
-
-        if (winType == WinType.ZIMO || winType == WinType.GANG_KAI ||
-            winType == WinType.TIAN_HU || winType == WinType.DI_HU || winType == WinType.HAIDI) {
-            // 自摸：其他三人各付 base
-            for (i in 0..3) {
-                if (i != winner) scoreManager.addPoints(playerIds[i] ?: return, -base)
+    private fun handlePengResult(result: PengResult) {
+        when (result) {
+            is PengResult.Success -> {
+                _events.tryEmit(MahjongRoomEvent.StateUpdated(result.state))
+                autoAdvanceIfNeeded(result.state)
             }
-            scoreManager.addPoints(playerIds[winner] ?: return, base * 3)
-        } else {
-            // 点炮：点炮者付 base×3
-            scoreManager.addPoints(playerIds[loser] ?: return, -base * 3)
-            scoreManager.addPoints(playerIds[winner] ?: return, base * 3)
-        }
-
-        server.broadcast(MessageType.GAME_OVER, GameOverInfo(
-            winner = winner,
-            winnerSide = if (winType == WinType.ZIMO) "ZIMO" else "DIANPAO",
-            scores = (0..3).map { i ->
-                i to scoreManager.getPoints(playerIds[i] ?: "")
-            }.toMap(),
-            finalMultiplier = fan
-        ))
-
-        // 3 秒后自动下一局
-        scope.launch {
-            delay(3000)
-            startGame()
+            is PengResult.Invalid -> {}
         }
     }
 
-    private fun syncAll(state: MahjongState) {
-        players.forEachIndexed { _, (id, _) ->
-            server.sendTo(id, MessageType.SYNC_STATE, state)
+    private fun handleChiResult(result: ChiResult) {
+        when (result) {
+            is ChiResult.Success -> {
+                _events.tryEmit(MahjongRoomEvent.StateUpdated(result.state))
+                autoAdvanceIfNeeded(result.state)
+            }
+            is ChiResult.Invalid -> {}
         }
     }
 
-    private fun handlePlayerLeave(playerIndex: Int) {
-        players = players.filterIndexed { i, _ -> playerIds[i] != playerIndex.toString() }
+    private fun handlePassResult(result: PassResult) {
+        when (result) {
+            is PassResult.NextDraw -> {
+                _events.tryEmit(MahjongRoomEvent.StateUpdated(result.state))
+                autoAdvanceIfNeeded(result.state)
+            }
+            is PassResult.DrawGame -> _events.tryEmit(MahjongRoomEvent.GameEnded(result.state, "流局"))
+        }
     }
 
-    fun stop() {
-        isRunning = false
-        broadcaster?.stop()
-        server.stop()
-        scope.cancel()
-    }
+    fun getPlayers(): List<DoudizhuRoomHost.PlayerInfo> = _players.toList()
+
+    fun stop() { isRunning = false; scope.cancel() }
 }

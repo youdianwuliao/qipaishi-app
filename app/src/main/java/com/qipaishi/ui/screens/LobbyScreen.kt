@@ -23,6 +23,7 @@ fun LobbyScreen(
     points: Int = 10000,
     rooms: Map<String, RoomScanner.RoomState> = emptyMap(),
     onCreateRoom: () -> Unit = {},
+    onCreateMahjongRoom: () -> Unit = {},
     onJoinRoom: (String, String) -> Unit = { _, _ -> }
 ) {
     Column(
@@ -73,6 +74,17 @@ fun LobbyScreen(
             shape = RoundedCornerShape(12.dp)
         ) {
             Text("🃏 创建斗地主房间", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        Button(
+            onClick = onCreateMahjongRoom,
+            modifier = Modifier.fillMaxWidth().height(56.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = GoldDark),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Text("🀄 创建麻将房间", fontSize = 16.sp, fontWeight = FontWeight.Bold)
         }
     }
 }
