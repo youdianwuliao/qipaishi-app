@@ -53,6 +53,8 @@ fun QipaishiApp() {
     var gameOverMsg by remember { mutableStateOf<String?>(null) }
     var roomPlayers by remember { mutableStateOf<List<DoudizhuRoomHost.PlayerInfo>>(emptyList()) }
     var roomHost by remember { mutableStateOf<DoudizhuRoomHost?>(null) }
+    var roomId by remember { mutableStateOf("") }
+    var gameStarted by remember { mutableStateOf(false) }
 
     val scope = rememberCoroutineScope()
     val scanner = remember { RoomScanner() }
@@ -61,19 +63,26 @@ fun QipaishiApp() {
     LaunchedEffect(Unit) { scanner.start(this) }
 
     fun createDoudizhu() {
+        val id = UUID.randomUUID().toString().take(6)
+        roomId = id
         val host = DoudizhuRoomHost(playerId, playerName, myPoints)
-        host.start(UUID.randomUUID().toString().take(6), scope)
+        host.start(id, scope)
         roomHost = host
         roomPlayers = host.getRoomPlayers()
-        screen = Screen.ROOM
+        gameStarted = false
         gameOverMsg = null
-        // 1.5 秒后自动开游戏
-        scope.launch { delay(1500); host.startGame() }
+        selectedCards = emptySet()
+        screen = Screen.ROOM
+    }
+
+    fun startGameWithAI() {
+        roomHost?.startGame()
     }
 
     fun leaveRoom() {
         roomHost?.stop(); roomHost = null
         engineState = null; gameOverMsg = null; selectedCards = emptySet()
+        gameStarted = false
         screen = Screen.LOBBY
     }
 
@@ -87,11 +96,13 @@ fun QipaishiApp() {
         Screen.ROOM -> {
             RoomScreen(
                 roomName = "${playerName}的牌桌",
+                roomId = roomId,
                 players = (0..2).map { i ->
                     if (i < roomPlayers.size)
                         RoomPlayerInfo(roomPlayers[i].name, i, roomPlayers[i].points, true)
-                    else RoomPlayerInfo("等待中...", i, 0, false)
+                    else RoomPlayerInfo("等待加入...", i, 0, false)
                 },
+                onStart = { startGameWithAI() },
                 onLeave = { leaveRoom() }
             )
             LaunchedEffect(roomHost) {
@@ -100,18 +111,21 @@ fun QipaishiApp() {
                         is DoudizhuRoomHost.RoomEvent.StateUpdated -> {
                             engineState = event.state
                             roomPlayers = roomHost?.getRoomPlayers() ?: roomPlayers
-                            if (screen == Screen.ROOM || screen == Screen.DOUDIZHU_GAME)
-                                screen = Screen.DOUDIZHU_GAME
+                            gameStarted = true
+                            screen = Screen.DOUDIZHU_GAME
                         }
                         is DoudizhuRoomHost.RoomEvent.GameEnded -> {
                             engineState = event.state
                             val scores = event.result.calculateScores()
-                            val landlordName = roomHost?.getRoomPlayers()?.find { it.index == event.state.landlordIndex }?.name ?: "地主"
                             val myDelta = scores[0] ?: 0
                             myPoints += myDelta
                             val emoji = if (myDelta > 0) "\uD83C\uDF89" else "\uD83D\uDE22"
-                            gameOverMsg = "$emoji ${if (myDelta > 0) "赢了" else "输了"} ${kotlin.math.abs(myDelta)} 分\n地主: $landlordName | 倍数: ${event.result.finalMultiplier}"
+                            val winText = if (myDelta > 0) "赢了" else "输了"
+                            gameOverMsg = "$emoji $winText ${kotlin.math.abs(myDelta)} 分 | 倍数: ${event.result.finalMultiplier}"
                             screen = Screen.DOUDIZHU_GAME
+                        }
+                        is DoudizhuRoomHost.RoomEvent.PlayerJoined -> {
+                            roomPlayers = event.players
                         }
                         else -> {}
                     }

@@ -103,40 +103,41 @@ class DoudizhuRoomHost(
 
     // ===== AI 自动推进 =====
 
+    /** AI 叫地主：只处理当前一个玩家，递归链由 handleBidResult 驱动 */
     private fun autoAdvanceAfterBid() {
         val state = engine.getState()
         if (state.phase != GamePhase.BIDDING) return
-        while (state.currentPlayerIndex != 0 && state.phase == GamePhase.BIDDING) {
-            val idx = state.currentPlayerIndex
-            val hand = engine.getHand(idx)
-            val currentBid = 0  // simulate: track current highest bid
-            val aiScore = DoudizhuAI.decideBid(hand, currentBid)
-            val result = engine.bid(idx, aiScore)
-            handleBidResult(result)
-            if (result is BidActionResult.BiddingDone || result is BidActionResult.Restart) break
-        }
+        if (state.currentPlayerIndex == 0) return
+
+        val idx = state.currentPlayerIndex
+        val hand = engine.getHand(idx)
+        val aiScore = DoudizhuAI.decideBid(hand, 0)
+        val result = engine.bid(idx, aiScore)
+        handleBidResult(result)
     }
 
+    /** AI 出牌：只处理当前一个玩家，递归链由 handlePlayResult 驱动 */
     private fun autoAdvanceAfterPlay() {
         val state = engine.getState()
         if (state.phase != GamePhase.PLAYING) return
         if (state.currentPlayerIndex == 0) return
+
         scope.launch {
-            delay(600) // 短暂延迟模拟思考
-            var currentState = engine.getState()
-            while (currentState.currentPlayerIndex != 0 && currentState.phase == GamePhase.PLAYING) {
-                val idx = currentState.currentPlayerIndex
-                val hand = engine.getHand(idx)
-                val lastPlay = currentState.lastPlay
-                val aiCards = if (lastPlay == null || lastPlay.playerIndex == idx) {
-                    DoudizhuAI.decideFreePlay(hand)
-                } else {
-                    DoudizhuAI.decideResponse(hand, lastPlay)
-                }
-                val result = if (aiCards.isEmpty()) engine.pass(idx) else engine.play(idx, aiCards)
-                handlePlayResult(result)
-                currentState = engine.getState()
+            delay(600)
+            val currentState = engine.getState()
+            if (currentState.phase != GamePhase.PLAYING) return@launch
+            if (currentState.currentPlayerIndex == 0) return@launch
+
+            val idx = currentState.currentPlayerIndex
+            val hand = engine.getHand(idx)
+            val lastPlay = currentState.lastPlay
+            val aiCards = if (lastPlay == null || lastPlay.playerIndex == idx) {
+                DoudizhuAI.decideFreePlay(hand)
+            } else {
+                DoudizhuAI.decideResponse(hand, lastPlay)
             }
+            val result = if (aiCards.isEmpty()) engine.pass(idx) else engine.play(idx, aiCards)
+            handlePlayResult(result)
         }
     }
 
