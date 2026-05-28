@@ -152,7 +152,20 @@ fun MahjongGameScreen(
     }
 
     if (isGameOver) {
-        GameOverDialog(message = gameOverMessage, onContinue = onContinue, onLeave = onLeave)
+        AlertDialog(
+            onDismissRequest = {},
+            containerColor = TableGreenDark,
+            shape = RoundedCornerShape(16.dp),
+            title = { Text("🀄 游戏结束", color = Gold, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth(), fontSize = 22.sp, fontWeight = FontWeight.Bold) },
+            text = { Text(gameOverMessage, color = CardWhite, textAlign = TextAlign.Center, fontSize = 16.sp) },
+            confirmButton = {
+                Button(onClick = { onContinue(); onLeave() },
+                    colors = ButtonDefaults.buttonColors(containerColor = GoldDark), shape = RoundedCornerShape(10.dp)) {
+                    Text("返回大厅", color = CardWhite, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {}
+        )
     }
 }
 
